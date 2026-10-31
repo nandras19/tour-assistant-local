@@ -30,12 +30,21 @@ MAX_STEPS = 8               # safety: stop a runaway loop of tool calls
 SYSTEM_PROMPT = """You are the visitor assistant for Gettysburg Lantern Tours, a walking tour company.
 Speak as the company ("we"), warmly and briefly: two to five sentences.
 
-The most important rule: answer only from the company documents. Use list_docs to see
-them and read_doc to read the relevant one BEFORE answering any factual question.
-Never guess a price, time, distance, age limit, or policy.
+The most important rule: answer only from the company documents. Call read_doc on the
+relevant document BEFORE answering any factual question. Read more than one if the
+question touches more than one topic. Never guess a price, time, distance, age limit,
+or policy.
+
+The documents and what each covers:
+- tours.md: every tour with price, length, walking, best-for, schedule; which tour to pick
+- faq.md: booking, group size limits, discounts, parking, dogs, rain, how scary
+- policies.md: refunds, cancellations, late arrival, accessibility, gift cards
+- about.md: address, phone, season, who we are
 
 If the documents do not contain the answer: say so plainly, offer to pass the question
-to the owner, ask for the visitor's email, and call log_inquiry once with the question.
+to the owner, ask for the visitor's email if you don't have it, and call the log_inquiry
+tool in that same turn. Calling the tool is the only way the owner finds out. Never say
+"I'll log this" or "I'll pass this along" without actually calling log_inquiry.
 
 When you recommend a tour, say why in one sentence based on what the visitor told you.
 End with the next step (how to book, where to meet) when it fits.
@@ -114,15 +123,52 @@ def ask_model(messages: list[dict]) -> dict:
         return json.loads(response.read())["message"]
 
 
+# Phrases that mean "I'm passing this to the owner". If the model says one of these
+# without having called log_inquiry, the loop sends it back once to actually do it.
+PROMISE_WORDS = ("log", "pass", "forward", "noted", "follow up", "follow-up", "owner will", "reach out")
+
+
+def promised_without_logging(text: str, logged: bool) -> bool:
+    """True if the reply promises a follow-up but no log_inquiry call happened this turn."""
+    lowered = text.lower()
+    return not logged and any(word in lowered for word in PROMISE_WORDS)
+
+
 def run_agent(messages: list[dict], verbose: bool = True) -> str:
     """The agent loop. Keeps going until the model replies with words instead of a tool call."""
+    read_any = False        # did the model read at least one document this turn?
+    logged = False          # did the model call log_inquiry during this turn?
+    nudges_left = 2         # at most two reminders per turn, so the loop always ends
     for _ in range(MAX_STEPS):
         reply = ask_model(messages)
         messages.append(reply)                       # the model's turn goes into the history
 
         tool_calls = reply.get("tool_calls") or []
         if not tool_calls:                           # no tools requested: this is the answer
-            return reply.get("content", "").strip()
+            text = reply.get("content", "").strip()
+
+            # Check 1: answered without reading anything. Small models skip this step and
+            # then invent facts, so send the question back once with a reminder.
+            if not read_any and nudges_left:
+                nudges_left -= 1
+                if verbose:
+                    print("   [check] answered without reading any document; asking it to read first")
+                messages.append({"role": "user", "content":
+                    "(system check) You answered without calling read_doc. Read the relevant "
+                    "document(s) first, then answer again using only what they say."})
+                continue
+
+            # Check 2: promised to pass the question along but never called log_inquiry.
+            if promised_without_logging(text, logged) and nudges_left:
+                nudges_left -= 1
+                if verbose:
+                    print("   [check] promised a follow-up without calling log_inquiry; asking again")
+                messages.append({"role": "user", "content":
+                    "(system check) You said you would pass this along, but you did not call "
+                    "log_inquiry. Call it now with the visitor's question, email, and details, "
+                    "then repeat your answer."})
+                continue
+            return text
 
         for call in tool_calls:                      # run each requested tool, add its result
             name = call["function"]["name"]
@@ -131,6 +177,10 @@ def run_agent(messages: list[dict], verbose: bool = True) -> str:
                 print(f"   [tool] {name}({', '.join(f'{k}={v!r}' for k, v in args.items())})")
             func = TOOL_FUNCTIONS.get(name)
             result = func(**args) if func else f"Unknown tool {name}"
+            if name == "log_inquiry":
+                logged = True
+            if name == "read_doc":
+                read_any = True
             messages.append({"role": "tool", "content": str(result), "tool_name": name})
 
     return "Sorry, I got stuck. Please call us at (717) 555-0142."
@@ -159,6 +209,7 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    import urllib.error
     try:
         main()
     except urllib.error.URLError:

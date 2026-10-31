@@ -14,9 +14,21 @@ An agent is a model in a loop with tools. Each pass through the loop:
 3. If it replies with a tool call, run that function, add the result to the
    conversation, and go back to step 1.
 
-That's the entire idea. In `agent.py` it is the `run_agent` function, about
-twenty lines. Everything else is the system prompt, three tool functions, and
-the plumbing that talks to Ollama.
+That's the entire idea. In `agent.py` it is the `run_agent` function. Everything
+else is the system prompt, three tool functions, and the plumbing that talks to
+Ollama.
+
+The loop also has two small checks, added after testing, because an 8B model
+sometimes skips steps a larger model wouldn't:
+
+- If it answers without having read any document, it is sent back once to read first.
+  (In testing it told a visitor dogs were welcome on a tour where they aren't,
+  because it answered from memory.)
+- If it says "I'll pass this to the owner" without calling `log_inquiry`, it is
+  sent back once to make the call.
+
+Those checks are plain Python, not prompt wording. That is the general lesson:
+when the model is unreliable about a rule, enforce the rule in code around it.
 
 ```
 user question
@@ -83,7 +95,9 @@ show someone who asked "but how does it actually work?"
 
 - The loop is small. The hard parts are the prompt, the tool descriptions, and
   testing with realistic conversations.
-- Small local models follow a grounding rule well when the rule is stated once,
-  plainly, and the tool to satisfy it (`read_doc`) is obvious.
+- Small local models follow a grounding rule most of the time, not all of the
+  time. The prompt gets you to "usually"; a check in the loop gets you to "always".
+- Answers take 10 to 20 seconds on an RTX 3060, versus a few seconds hosted.
+  Fine for a demo, slow for a website widget.
 - Keeping the whole conversation in a list and resending it every turn is how
   the model "remembers". Nothing is stored on the model side.
